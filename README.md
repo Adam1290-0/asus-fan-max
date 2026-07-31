@@ -1,5 +1,7 @@
 # asus-fan-max
 
+> ⚠️ **USE AT YOUR OWN RISK.** This tool bypasses manufacturer-imposed hardware limits via kernel-level driver access. It may void your warranty, reduce fan lifespan, or cause system instability. See [DISCLAIMER.md](DISCLAIMER.md) for full details. By using this software, you accept all responsibility for any consequences.
+
 **Your ASUS fan can do 7200+ RPM. The EC firmware locks it at ~4000. This tool unlocks it.**
 
 A Windows daemon that bypasses the EC (Embedded Controller) firmware fan speed limit on ASUS laptops by communicating directly with the `AsusSAIO.sys` kernel driver — the same path used by MyASUS's built-in "Fan Diagnosis" feature.
@@ -54,7 +56,7 @@ This tool automates that exact mechanism: it enters the hardware test mode when 
 
 ```powershell
 # 1. Clone or download this repo
-git clone https://github.com/YOUR_USERNAME/asus-fan-max.git
+git clone https://github.com/Adam1290-0/asus-fan-max.git
 cd asus-fan-max
 
 # 2. Copy config and adjust thresholds if needed
@@ -164,3 +166,17 @@ This tool bypasses manufacturer-imposed fan speed limits. See [DISCLAIMER.md](DI
 ## License
 
 MIT — do whatever you want with the code. AsusWinIO64.dll is ASUS's property and is NOT included.
+
+## Acknowledgments
+
+This project stands on the shoulders of the ASUS laptop community:
+
+- **[GHelper](https://github.com/seerge/g-helper)** (14K+ ⭐) — The definitive open-source Armoury Crate alternative. Its source code (`AsusACPI.cs`) was instrumental in understanding the ATKACPI device interface, fan curve format, and EC communication protocol. GHelper handles your daily fan curves and performance modes; this tool adds the emergency full-speed layer on top.
+
+- **[atrofac](https://github.com/cronosun/atrofac)** — A clean, minimal fan curve tool whose Rust implementation of the ATKACPI DEVS/DSTS interface provided a second reference for understanding the EC protocol and validating our findings.
+
+- **[Karmel0x/AsusFanControl](https://github.com/Karmel0x/AsusFanControl)** — Early pioneer of the AsusWinIO64.dll approach. Their work confirmed that the MyASUS Fan Diagnosis library could be used outside of MyASUS, which inspired this project's direction.
+
+- **The ASUS ROG/TUF community** — Hundreds of GitHub issues, Reddit threads, and forum posts documenting the fan speed limitation problem. You made it clear this tool was needed.
+
+This project is an independent community effort and is **not affiliated with, endorsed by, or supported by ASUSTeK Computer Inc.**
