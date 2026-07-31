@@ -62,11 +62,13 @@ cd asus-fan-max
 # 2. Copy config and adjust thresholds if needed
 copy config.example.json config.json
 
-# 3. Run calibration (as Admin) to verify hardware compatibility
-#    This enters test mode briefly and measures your actual max RPM
+# 3. Discover your hardware (no admin needed for ATKACPI scan)
+python fan_daemon.py --discover
+
+# 4. Run calibration (as Admin) to verify max RPM
 Start-Process python -Verb RunAs -ArgumentList "fan_daemon.py --calibrate"
 
-# 4. Install as a SYSTEM service (auto-start on logon)
+# 5. Install as a SYSTEM service (auto-start on logon)
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 

@@ -288,6 +288,105 @@ def calibrate(config):
     print("Record these values for your COMPATIBILITY.md entry.")
 
 
+# --- Discovery Mode ---
+def discover(config):
+    """Scan ATKACPI endpoints and identify hardware configuration."""
+    print("=== Hardware Discovery ===")
+    print("Scanning ATKACPI device IDs for sensors and fans...\n")
+
+    reader = AtkAcpiReader()
+    try:
+        reader.open()
+    except OSError as e:
+        print(f"ERROR: Cannot open ATKACPI: {e}")
+        return
+
+    # Scan temperature sensors (0x0012xxxx range)
+    print("--- Temperature Sensors ---")
+    print(f"{'Device ID':<12} {'Value':<8} {'Interpretation'}")
+    print("-" * 45)
+    temp_sensors = []
+    for low in range(0x80, 0xB0):
+        dev_id = 0x00120000 | low
+        raw = reader.read_temp(dev_id)
+        if raw is not None and 15 <= raw <= 110:
+            label = ""
+            if dev_id == 0x00120094:
+                label = "CPU (known)"
+            elif dev_id == 0x00120097:
+                label = "GPU (known)"
+            elif 20 <= raw <= 90:
+                label = "possible sensor"
+            if label:
+                print(f"  0x{dev_id:08X}  {raw:<8} {label}")
+                temp_sensors.append((dev_id, raw, label))
+
+    # Scan fan RPM endpoints (0x0011xxxx range)
+    print("\n--- Fan RPM Endpoints (ATKACPI DSTS) ---")
+    print(f"{'Device ID':<12} {'Raw':<10} {'RPM':<8}")
+    print("-" * 35)
+    fan_endpoints = []
+    for low in range(0x10, 0x40):
+        dev_id = 0x00110000 | low
+        in_data = b"DSTS" + struct.pack("<I", 8) + struct.pack("<I", dev_id) + b"\x00" * 4
+        in_buf = ctypes.create_string_buffer(in_data, 16)
+        out_buf = ctypes.create_string_buffer(1024)
+        written = wt.DWORD(0)
+        ok = reader.kernel32.DeviceIoControl(
+            wt.HANDLE(reader.handle), wt.DWORD(CONTROL_CODE),
+            in_buf, wt.DWORD(16), out_buf, wt.DWORD(1024),
+            ctypes.byref(written), None
+        )
+        if ok:
+            raw = struct.unpack_from("<i", out_buf.raw, 0)[0]
+            adj = raw - 65536
+            rpm = (adj & 0xFFFF) * 100
+            if 0 < rpm < 15000:
+                label = ""
+                if dev_id == 0x00110013:
+                    label = "CPU fan (known)"
+                elif dev_id == 0x00110014:
+                    label = "GPU fan (known)"
+                elif dev_id == 0x00110031:
+                    label = "Mid fan (known)"
+                print(f"  0x{dev_id:08X}  0x{raw & 0xFFFFFFFF:08X}  {rpm:<8} {label}")
+                fan_endpoints.append((dev_id, rpm, label))
+
+    reader.close()
+
+    # AsusWinIO fan discovery
+    print("\n--- AsusWinIO Fan Indices ---")
+    ctrl = AsusWinIoController(config["dll_path"])
+    try:
+        ctrl.load()
+        if not ctrl.ensure_initialized():
+            print("  InitializeWinIo failed (need SYSTEM privileges)")
+            print("  Run as SYSTEM for full discovery.")
+        else:
+            fan_count = ctrl.get_fan_counts()
+            print(f"  FanCounts = {fan_count}")
+            print(f"  {'Index':<8} {'RPM':<8}")
+            print("  " + "-" * 16)
+            for i in range(min(fan_count + 2, 6)):
+                rpm = ctrl.get_fan_rpm(i)
+                print(f"  {i:<8} {rpm:<8}")
+            ctrl.shutdown()
+    except Exception as e:
+        print(f"  AsusWinIO not available: {e}")
+
+    # Summary
+    print("\n=== Discovery Summary ===")
+    print(f"  Temperature sensors found: {len(temp_sensors)}")
+    print(f"  Fan RPM endpoints found: {len(fan_endpoints)}")
+    print(f"\n  Standard mapping (works on most ASUS laptops):")
+    print(f"    CPU temp: 0x00120094")
+    print(f"    GPU temp: 0x00120097")
+    print(f"    CPU fan (AsusWinIO index): 0")
+    print(f"    GPU fan (AsusWinIO index): 1")
+    print(f"\n  If your fans respond to the wrong index, swap them in config.")
+    print(f"  Run --calibrate as SYSTEM to verify fan RPM at duty=255.")
+
+
 # --- Daemon Mode ---
 def run_daemon(config):
     log = logging.getLogger("asus-fan-max")
@@ -412,6 +511,7 @@ def run_daemon(config):
 def main():
     parser = argparse.ArgumentParser(description="ASUS fan max-speed override daemon")
     parser.add_argument("--calibrate", action="store_true", help="Discover fans and measure max RPM")
+    parser.add_argument("--discover", action="store_true", help="Scan ATKACPI endpoints and identify hardware")
     parser.add_argument("--config", type=str, default=None, help="Path to config JSON file")
     parser.add_argument("--status", action="store_true", help="Print status file content and exit")
     args = parser.parse_args()
@@ -439,6 +539,8 @@ def main():
 
     if args.calibrate:
         calibrate(config)
+    elif args.discover:
+        discover(config)
     else:
         run_daemon(config)
 
