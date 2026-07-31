@@ -1,0 +1,10 @@
+{
+    "forced_threshold_c": 80,
+    "normal_threshold_c": 70,
+    "sustained_count": 3,
+    "poll_interval_sec": 1,
+    "fan_duty_max": 255,
+    "dll_path": "",
+    "log_file": "asus-fan-max.log",
+    "status_file": "asus-fan-max-status.txt"
+}
