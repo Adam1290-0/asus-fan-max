@@ -1,5 +1,7 @@
 # asus-fan-max
 
+**v1.1.0** · [Changelog](CHANGELOG.md)
+
 > ⚠️ **USE AT YOUR OWN RISK.** This tool bypasses manufacturer-imposed hardware limits via kernel-level driver access. It may void your warranty, reduce fan lifespan, or cause system instability. See [DISCLAIMER.md](DISCLAIMER.md) for full details. By using this software, you accept all responsibility for any consequences.
 
 **Your ASUS fan can do 7200+ RPM. The EC firmware locks it at ~4000. This tool unlocks it.**
@@ -209,3 +211,10 @@ This project stands on the shoulders of the ASUS laptop community:
 - **The ASUS ROG/TUF community** — Hundreds of GitHub issues, Reddit threads, and forum posts documenting the fan speed limitation problem. You made it clear this tool was needed.
 
 This project is an independent community effort and is **not affiliated with, endorsed by, or supported by ASUSTeK Computer Inc.**
+
+## Known Issues
+
+- **Fan index varies by hardware**: On some models (or with aftermarket fans) the CPU/GPU fan index is swapped. If the wrong fan spins up, swap `cpu_fan_idx` and `gpu_fan_idx` in `config.json`.
+- **RPM is hardware-specific**: `duty=255` produces different RPM on different fan models. Always run `--calibrate` first — the values in this README are from a G14 with aftermarket high-speed fans.
+- **ATKACPI can hang after power events**: Unplugging/replugging the power adapter can leave `\\.\ATKACPI` unresponsive. v1.1.0 adds a 3s timeout guard per read, plus the installer now generates a self-restarting wrapper, so the daemon recovers automatically. If you're on an older version, update.
+- **ASUS driver updates can break this**: ASUS has previously pushed driver updates that break community fan tools. If the DLL path or fan APIs stop working after an update, re-run `--discover` and check `sc qc AsusSAIO`.

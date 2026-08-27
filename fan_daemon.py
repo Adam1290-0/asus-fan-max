@@ -18,6 +18,7 @@ Requirements:
 
 WARNING: See DISCLAIMER.md before use. This tool operates at kernel driver level.
 """
+__version__ = "1.1.0"
 import ctypes
 import ctypes.wintypes as wt
 import struct
@@ -27,6 +28,7 @@ import time
 import signal
 import atexit
 import logging
+import threading
 import argparse
 import json
 from pathlib import Path
@@ -125,22 +127,43 @@ class AtkAcpiReader:
             self.handle = None
 
     def read_temp(self, device_id):
+        """Read temperature in Celsius with a timeout guard.
+
+        Returns None on failure or timeout. The timeout guard prevents a stuck
+        DeviceIoControl (e.g. after an ACPI device hiccup) from freezing the
+        whole daemon loop."""
         if not self.handle:
             return None
-        in_data = b"DSTS" + struct.pack("<I", 8) + struct.pack("<I", device_id) + b"\x00" * 4
-        in_buf = ctypes.create_string_buffer(in_data, 16)
-        out_buf = ctypes.create_string_buffer(1024)
-        written = wt.DWORD(0)
-        ok = self.kernel32.DeviceIoControl(
-            wt.HANDLE(self.handle), wt.DWORD(CONTROL_CODE),
-            in_buf, wt.DWORD(16), out_buf, wt.DWORD(1024),
-            ctypes.byref(written), None
-        )
-        if not ok:
+        result = {}
+
+        def _raw():
+            try:
+                in_data = b"DSTS" + struct.pack("<I", 8) + struct.pack("<I", device_id) + b"\x00" * 4
+                in_buf = ctypes.create_string_buffer(in_data, 16)
+                out_buf = ctypes.create_string_buffer(1024)
+                written = wt.DWORD(0)
+                ok = self.kernel32.DeviceIoControl(
+                    wt.HANDLE(self.handle), wt.DWORD(CONTROL_CODE),
+                    in_buf, wt.DWORD(16), out_buf, wt.DWORD(1024),
+                    ctypes.byref(written), None
+                )
+                if not ok:
+                    result["val"] = None
+                else:
+                    raw = struct.unpack_from("<i", out_buf.raw, 0)[0]
+                    temp = raw - 65536
+                    result["val"] = temp if 0 <= temp <= 120 else None
+            except Exception:
+                result["val"] = None
+
+        t = threading.Thread(target=_raw, daemon=True)
+        t.start()
+        t.join(3.0)  # 3s timeout
+        if t.is_alive():
+            # DeviceIoControl is stuck; the caller will detect repeated
+            # failures and reopen ATKACPI, which releases the stuck call.
             return None
-        raw = struct.unpack_from("<i", out_buf.raw, 0)[0]
-        temp = raw - 65536
-        return temp if 0 <= temp <= 120 else None
+        return result.get("val")
 
 
 # --- AsusWinIO Fan Controller ---

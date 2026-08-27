@@ -35,11 +35,14 @@ Write-Host "  Python: $PythonPath"
 Write-Host "  Script: $DaemonScript"
 Write-Host ""
 
-# Create wrapper batch file
+# Create wrapper batch file (loops so a crashed daemon restarts automatically)
 $BatPath = Join-Path $ScriptDir "run_daemon.bat"
 @"
 @echo off
+:loop
 "$PythonPath" "$DaemonScript" --config "$ScriptDir\config.json"
+timeout /t 5 /nobreak > nul
+goto loop
 "@ | Out-File -FilePath $BatPath -Encoding ASCII
 
 Write-Host "  Wrapper: $BatPath"
