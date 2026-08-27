@@ -89,9 +89,13 @@ Edit `config.json`:
     "sustained_count": 3,
     "poll_interval_sec": 1,
     "fan_duty_max": 255,
+    "release_duty": 128,
+    "cpu_fan_idx": 0,
+    "gpu_fan_idx": 1,
     "dll_path": "",
     "log_file": "asus-fan-max.log",
-    "status_file": "asus-fan-max-status.txt"
+    "status_file": "asus-fan-max-status.txt",
+    "cmd_file": "asus-fan-max-cmd.txt"
 }
 ```
 
@@ -102,9 +106,31 @@ Edit `config.json`:
 | `sustained_count` | 3 | Seconds the threshold must be held before acting |
 | `poll_interval_sec` | 1 | Temperature polling interval |
 | `fan_duty_max` | 255 | PWM duty cycle (0-255). 255 = physical maximum |
+| `release_duty` | 128 | Mid duty for a fan released while its sibling is still forced |
+| `cpu_fan_idx` | 0 | AsusWinIO fan index for CPU fan (see note below) |
+| `gpu_fan_idx` | 1 | AsusWinIO fan index for GPU fan (see note below) |
 | `dll_path` | auto | Path to AsusWinIO64.dll (auto-detected if empty) |
 | `log_file` | asus-fan-max.log | Log file path (empty = stdout only) |
 | `status_file` | asus-fan-max-status.txt | Status file for external tools to read |
+| `cmd_file` | asus-fan-max-cmd.txt | Command file for external GUI control (empty = disabled) |
+
+**Fan index note**: On most laptops `0` = CPU fan and `1` = GPU fan, but this can be swapped depending on the model or aftermarket fan hardware. If you notice the CPU fan doesn't spin up when the CPU is hot (but the GPU fan does), swap `cpu_fan_idx` and `gpu_fan_idx`.
+
+## Manual Control & Override Switch (via cmd_file)
+
+If `cmd_file` is set, the daemon watches it for one-shot commands (the file is deleted after each command):
+
+| Command | Effect |
+|---------|--------|
+| `force` | Manually run both fans at full speed (works even when auto is disabled) |
+| `release` | Stop manual full-speed, return to auto/EC control |
+| `disable` | Turn off ALL override (auto + manual). Fans fully handed back to EC |
+| `enable` | Turn auto override back on |
+
+Example (PowerShell):
+```powershell
+Set-Content -Path "asus-fan-max-cmd.txt" -Value "force" -NoNewline
+```
 
 ## Calibration
 
@@ -136,6 +162,7 @@ If your RPM values are significantly different from the examples in [COMPATIBILI
 - ✅ **Fans never stop**: Exiting test mode returns control to EC, fans continue running on the normal curve
 - ✅ **Hysteresis**: 10°C gap between trigger (80°C) and release (70°C) prevents rapid cycling
 - ✅ **Sustained threshold**: Must stay hot for 3 consecutive seconds (no spike triggers)
+- ✅ **Fail-safe**: If a temperature sensor becomes unreadable for 10 seconds, both fans are forced to max to prevent overheating
 - ✅ **Crash-safe**: `atexit` handler releases test mode; worst case = fans stay loud until reboot
 - ⚠️ **See [DISCLAIMER.md](DISCLAIMER.md) for full risk disclosure**
 

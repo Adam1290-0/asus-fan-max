@@ -39,9 +39,13 @@ DEFAULT_CONFIG = {
     "sustained_count": 3,
     "poll_interval_sec": 1,
     "fan_duty_max": 255,
+    "release_duty": 128,  # mid duty for a fan released while its sibling is still forced
+    "cpu_fan_idx": 0,     # AsusWinIO fan index for CPU (0 on most models; 1 if swapped)
+    "gpu_fan_idx": 1,     # AsusWinIO fan index for GPU (1 on most models; 0 if swapped)
     "dll_path": "",  # empty = auto-detect
     "log_file": "",  # empty = stdout only
     "status_file": "",  # empty = disabled
+    "cmd_file": "",  # empty = command file disabled (no GUI manual control)
 }
 
 
@@ -214,6 +218,19 @@ class AsusWinIoController:
         if self.initialized and self.test_mode_active:
             self._set_test_mode(0)
         self.shutdown()
+
+    def release_fan(self, fan_idx, other_fan_forced, release_duty):
+        """Release a fan. Test mode is global, so when the sibling is still
+        forced we cannot hand this fan back to the EC; drop it to a safe mid
+        duty instead so it slows down without stopping."""
+        if not self.initialized:
+            return True
+        if not other_fan_forced:
+            self._set_test_mode(0)
+            self.shutdown()
+        else:
+            self._set_duty(fan_idx, release_duty)
+        return True
 
 
 # --- Per-fan State Machine ---
@@ -429,13 +446,14 @@ def run_daemon(config):
         log.error(f"Cannot load DLL: {e}")
         sys.exit(1)
 
-    cpu_fan = FanState("CPU", 0, CPU_TEMP_ID, config)
-    gpu_fan = FanState("GPU", 1, GPU_TEMP_ID, config)
+    cpu_fan = FanState("CPU", config["cpu_fan_idx"], CPU_TEMP_ID, config)
+    gpu_fan = FanState("GPU", config["gpu_fan_idx"], GPU_TEMP_ID, config)
 
     def write_status(cpu_state, gpu_state):
         if config["status_file"]:
+            en = "on" if enabled else "off"
             try:
-                Path(config["status_file"]).write_text(f"{cpu_state},{gpu_state}")
+                Path(config["status_file"]).write_text(f"{cpu_state},{gpu_state},{en}")
             except Exception:
                 pass
 
@@ -446,7 +464,11 @@ def run_daemon(config):
         except Exception as e:
             log.error(f"Cleanup error: {e}")
         reader.close()
-        write_status("Off", "Off")
+        try:
+            if config["status_file"]:
+                Path(config["status_file"]).write_text("Off,Off,off")
+        except Exception:
+            pass
         log.info("=== asus-fan-max stopped ===")
 
     atexit.register(cleanup)
@@ -454,17 +476,98 @@ def run_daemon(config):
     signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
 
     log.info("Entering main loop")
-    write_status("Normal", "Normal")
     consecutive_errors = 0
+    cpu_read_errors = 0
+    gpu_read_errors = 0
+    manual_mode = False
+    enabled = True
+    fail_safe_active = False
+    cmd_file = config["cmd_file"]
+    duty = config["fan_duty_max"]
+    release_duty = config["release_duty"]
+    cpu_idx = config["cpu_fan_idx"]
+    gpu_idx = config["gpu_fan_idx"]
+
+    def check_command():
+        """Handle override commands from an external controller."""
+        nonlocal manual_mode, enabled, fail_safe_active
+        if not cmd_file:
+            return
+        try:
+            p = Path(cmd_file)
+            if p.exists():
+                cmd = p.read_text().strip().lower()
+                p.unlink()
+                if cmd == "force" and not manual_mode:
+                    manual_mode = True
+                    log.info("MANUAL MODE ON (user command)")
+                    ctrl.force_fan(cpu_idx, duty)
+                    ctrl.force_fan(gpu_idx, duty)
+                    write_status("Manual", "Manual")
+                elif cmd == "release" and manual_mode:
+                    manual_mode = False
+                    log.info("MANUAL MODE OFF (user command)")
+                    ctrl.release_all()
+                    cpu_fan.forced = False
+                    gpu_fan.forced = False
+                    write_status("Normal" if enabled else "Off", "Normal" if enabled else "Off")
+                elif cmd == "disable":
+                    enabled = False
+                    manual_mode = False
+                    fail_safe_active = False
+                    log.info("FAN OVERRIDE DISABLED (all override off)")
+                    ctrl.release_all()
+                    cpu_fan.forced = False
+                    gpu_fan.forced = False
+                    write_status("Off", "Off")
+                elif cmd == "enable":
+                    enabled = True
+                    log.info("FAN OVERRIDE ENABLED (auto mode on)")
+                    write_status("Normal", "Normal")
+        except Exception:
+            pass
+
+    # Clear any stale command file so a reboot never re-applies an old command.
+    if cmd_file:
+        try:
+            p = Path(cmd_file)
+            if p.exists():
+                p.unlink()
+                log.info("Cleared stale command file on startup")
+        except Exception:
+            pass
+
+    write_status("Normal", "Normal")
 
     while True:
+        check_command()
+
+        if manual_mode:
+            time.sleep(config["poll_interval_sec"])
+            continue
+
+        if not enabled:
+            time.sleep(config["poll_interval_sec"])
+            continue
+
         cpu_temp = reader.read_temp(CPU_TEMP_ID)
         gpu_temp = reader.read_temp(GPU_TEMP_ID)
+
+        # Per-sensor failure tracking: a single dead sensor must not go
+        # unnoticed or that chip could overheat while the daemon looks healthy.
+        cpu_read_errors = 0 if cpu_temp is not None else cpu_read_errors + 1
+        gpu_read_errors = 0 if gpu_temp is not None else gpu_read_errors + 1
+        sensor_dead = cpu_read_errors >= 10 or gpu_read_errors >= 10
 
         if cpu_temp is None and gpu_temp is None:
             consecutive_errors += 1
             if consecutive_errors >= 10:
-                log.warning("10 consecutive read failures, reopening ATKACPI")
+                if not fail_safe_active:
+                    fail_safe_active = True
+                    log.error("FAIL-SAFE: temperature unreadable for 10s, forcing fans to max")
+                    ctrl.force_fan(cpu_idx, duty)
+                    ctrl.force_fan(gpu_idx, duty)
+                    write_status("Forced", "Forced")
                 reader.close()
                 time.sleep(1)
                 try:
@@ -476,32 +579,70 @@ def run_daemon(config):
             continue
 
         consecutive_errors = 0
-        duty = config["fan_duty_max"]
+
+        # One sensor dead while the other still reads: force both fans anyway.
+        if sensor_dead and not fail_safe_active:
+            fail_safe_active = True
+            log.error(
+                f"FAIL-SAFE: sensor stuck (cpu_err={cpu_read_errors}, gpu_err={gpu_read_errors}), forcing fans to max"
+            )
+            ctrl.force_fan(cpu_idx, duty)
+            ctrl.force_fan(gpu_idx, duty)
+            cpu_fan.forced = True
+            gpu_fan.forced = True
+            write_status("Forced", "Forced")
+            reader.close()
+            time.sleep(1)
+            try:
+                reader.open()
+            except OSError:
+                pass
+            time.sleep(config["poll_interval_sec"])
+            continue
+
+        # Exit fail-safe once temperatures are readable again
+        if fail_safe_active and not sensor_dead:
+            fail_safe_active = False
+            cpu_hot = cpu_temp is not None and cpu_temp >= config["forced_threshold_c"]
+            gpu_hot = gpu_temp is not None and gpu_temp >= config["forced_threshold_c"]
+            if not cpu_hot and not gpu_hot:
+                log.info("FAIL-SAFE released (temperatures readable again)")
+                ctrl.release_all()
+                cpu_fan.forced = False
+                gpu_fan.forced = False
+                write_status("Normal", "Normal")
+            else:
+                if cpu_hot:
+                    cpu_fan.forced = True
+                if gpu_hot:
+                    gpu_fan.forced = True
+                write_status(
+                    "Forced" if cpu_fan.forced else "Normal",
+                    "Forced" if gpu_fan.forced else "Normal",
+                )
 
         action = cpu_fan.update(cpu_temp)
         if action == "enter":
             log.info(f"CPU fan FORCED (CPU={cpu_temp}C, sustained {config['sustained_count']}s)")
-            if not ctrl.force_fan(0, duty):
+            if not ctrl.force_fan(cpu_idx, duty):
                 log.error("CPU fan force failed")
                 cpu_fan.forced = False
             write_status("Forced" if cpu_fan.forced else "Normal", "Forced" if gpu_fan.forced else "Normal")
         elif action == "leave":
             log.info(f"CPU fan released (CPU={cpu_temp}C)")
-            if not gpu_fan.forced:
-                ctrl.release_all()
+            ctrl.release_fan(cpu_idx, gpu_fan.forced, release_duty)
             write_status("Normal", "Forced" if gpu_fan.forced else "Normal")
 
         action = gpu_fan.update(gpu_temp)
         if action == "enter":
             log.info(f"GPU fan FORCED (GPU={gpu_temp}C, sustained {config['sustained_count']}s)")
-            if not ctrl.force_fan(1, duty):
+            if not ctrl.force_fan(gpu_idx, duty):
                 log.error("GPU fan force failed")
                 gpu_fan.forced = False
             write_status("Forced" if cpu_fan.forced else "Normal", "Forced" if gpu_fan.forced else "Normal")
         elif action == "leave":
             log.info(f"GPU fan released (GPU={gpu_temp}C)")
-            if not cpu_fan.forced:
-                ctrl.release_all()
+            ctrl.release_fan(gpu_idx, cpu_fan.forced, release_duty)
             write_status("Forced" if cpu_fan.forced else "Normal", "Normal")
 
         time.sleep(config["poll_interval_sec"])

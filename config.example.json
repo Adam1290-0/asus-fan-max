@@ -4,7 +4,11 @@
     "sustained_count": 3,
     "poll_interval_sec": 1,
     "fan_duty_max": 255,
+    "release_duty": 128,
+    "cpu_fan_idx": 0,
+    "gpu_fan_idx": 1,
     "dll_path": "",
     "log_file": "asus-fan-max.log",
-    "status_file": "asus-fan-max-status.txt"
+    "status_file": "asus-fan-max-status.txt",
+    "cmd_file": "asus-fan-max-cmd.txt"
 }
