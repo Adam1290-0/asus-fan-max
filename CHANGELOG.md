@@ -2,6 +2,13 @@
 
 All notable changes to asus-fan-max are documented here.
 
+## [1.1.1] - 2026-09-10
+
+### Fixed
+- **Daemon hang via AsusWinIO calls**: the 3s timeout in v1.1.0 only covered `read_temp`. Driver calls made while entering/exiting test mode (`InitializeWinIo`, `Set_FanPwmDuty`, `SetFanTestMode`) could still block forever. Added a watchdog thread: if the main loop produces no heartbeat for 90 seconds, the daemon force-exits and the looping wrapper restarts it.
+- **Residual test mode after a force-exit**: if the previous process died (crash or watchdog) while fans were forced, the EC test mode could stay active with fans pinned at max. On startup the daemon now explicitly clears test mode before entering the loop.
+- **Wrapper delay unreliable**: the generated batch file used `timeout /nobreak`, which can fail in SYSTEM's console-less session. Switched to `ping` for the restart delay.
+
 ## [1.1.0] - 2026-08-27
 
 ### Fixed

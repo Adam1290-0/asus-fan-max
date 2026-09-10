@@ -1,6 +1,6 @@
 # asus-fan-max
 
-**v1.1.0** · [Changelog](CHANGELOG.md)
+**v1.1.1** · [Changelog](CHANGELOG.md)
 
 > ⚠️ **USE AT YOUR OWN RISK.** This tool bypasses manufacturer-imposed hardware limits via kernel-level driver access. It may void your warranty, reduce fan lifespan, or cause system instability. See [DISCLAIMER.md](DISCLAIMER.md) for full details. By using this software, you accept all responsibility for any consequences.
 

@@ -18,7 +18,7 @@ Requirements:
 
 WARNING: See DISCLAIMER.md before use. This tool operates at kernel driver level.
 """
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 import ctypes
 import ctypes.wintypes as wt
 import struct
@@ -472,6 +472,21 @@ def run_daemon(config):
     cpu_fan = FanState("CPU", config["cpu_fan_idx"], CPU_TEMP_ID, config)
     gpu_fan = FanState("GPU", config["gpu_fan_idx"], GPU_TEMP_ID, config)
 
+    # Clear any residual EC test mode left by a previous crash or watchdog
+    # force-exit, so fans don't stay pinned at max from a dead process.
+    def _clear_residual():
+        try:
+            if ctrl.ensure_initialized():
+                ctrl._set_test_mode(0)
+                ctrl.shutdown()
+        except Exception:
+            pass
+    _ct = threading.Thread(target=_clear_residual, daemon=True)
+    _ct.start()
+    _ct.join(5.0)
+    if _ct.is_alive():
+        log.warning("Startup residual-clear timed out (driver may be busy); continuing")
+
     def write_status(cpu_state, gpu_state):
         if config["status_file"]:
             en = "on" if enabled else "off"
@@ -497,6 +512,20 @@ def run_daemon(config):
     atexit.register(cleanup)
     signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
     signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
+
+    # Watchdog: if the main loop freezes (e.g. a driver call blocks forever,
+    # which read_temp's timeout can't cover), force-exit so the looping
+    # wrapper restarts a fresh daemon.
+    _hb = [time.time()]
+
+    def _watchdog():
+        while True:
+            time.sleep(10)
+            if time.time() - _hb[0] > 90:
+                log.error("WATCHDOG: main loop frozen >90s, force-exiting for restart")
+                os._exit(1)
+
+    threading.Thread(target=_watchdog, daemon=True).start()
 
     log.info("Entering main loop")
     consecutive_errors = 0
@@ -563,6 +592,7 @@ def run_daemon(config):
     write_status("Normal", "Normal")
 
     while True:
+        _hb[0] = time.time()
         check_command()
 
         if manual_mode:
