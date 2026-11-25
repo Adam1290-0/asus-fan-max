@@ -2,6 +2,17 @@
 
 All notable changes to asus-fan-max are documented here.
 
+## [1.1.2] - 2026-11-25
+
+### Fixed
+- **Hardcoded DriverStore path killed the daemon for weeks (critical)**: `asussci2.inf_amd64_<hash>` directory names change with every ASUS driver update, and the old hash is deleted. A driver update on 2026-09-30 invalidated the DLL path, so the daemon died at startup every 5 seconds — 103,000+ restart cycles and a 50 MB log, while the 85 °C thermal override silently did not exist. Version 1.1.1 already had a DriverStore fallback in `find_dll_path()`, but the deployed copy on the reporting machine was the older hardcoded build; **a fixed repo is not a fixed deployment**.
+- **DLL discovery now tries every candidate**: `find_dll_candidates()` returns all `asussci2.inf_amd64_*\ASUSSystemAnalysis\AsusWinIO64.dll` paths plus the live `AsusSAIO` driver path, newest first, deduped case-insensitively. `run_daemon` attempts each in turn and only aborts when every one fails, logging each failure.
+- **`--discover` / `--calibrate` no longer abort without a configured DLL**: they resolve a candidate themselves instead of exiting at `main()`'s pre-flight check.
+
+### Added
+- **Log rotation**: log files are now capped at 10 MB with 2 rotated backups (`RotatingFileHandler`) instead of growing without limit. A crash loop can no longer fill the disk.
+- **Startup failure backoff**: any fatal startup error (not SYSTEM, ATKACPI unavailable, no usable DLL) logs the reason, then sleeps 60 s before exiting. Combined with the looping wrapper this drops a persistent-failure restart loop from ~720 to ~55 attempts per hour.
+
 ## [1.1.1] - 2026-09-10
 
 ### Fixed

@@ -18,7 +18,7 @@ Requirements:
 
 WARNING: See DISCLAIMER.md before use. This tool operates at kernel driver level.
 """
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 import ctypes
 import ctypes.wintypes as wt
 import struct
@@ -28,6 +28,7 @@ import time
 import signal
 import atexit
 import logging
+import logging.handlers
 import threading
 import argparse
 import json
@@ -51,9 +52,25 @@ DEFAULT_CONFIG = {
 }
 
 
-def find_dll_path():
-    """Auto-detect AsusWinIO64.dll from the active AsusSAIO driver."""
+def find_dll_candidates():
+    """Return all available AsusWinIO64.dll paths, newest first.
+
+    The asussci2.inf DriverStore directory hash changes with every ASUS driver
+    update, and stale hash directories can linger next to the current one, so
+    we always try candidates newest-first instead of trusting one fixed path.
+    """
     import subprocess
+    candidates = []
+    seen = set()
+
+    def _add(path):
+        # Windows paths are case-insensitive; sc.exe may report a different
+        # directory casing than the glob does, so dedupe on normcase.
+        key = os.path.normcase(os.path.abspath(path))
+        if key not in seen:
+            seen.add(key)
+            candidates.append(path)
+
     try:
         out = subprocess.check_output(["sc.exe", "qc", "AsusSAIO"], text=True, stderr=subprocess.DEVNULL)
         for line in out.split("\n"):
@@ -65,19 +82,29 @@ def find_dll_path():
                 dll_dir = os.path.dirname(path)
                 dll_path = os.path.join(dll_dir, "AsusWinIO64.dll")
                 if os.path.exists(dll_path):
-                    return dll_path
+                    _add(dll_path)
     except Exception:
         pass
 
-    # Fallback: search DriverStore
+    # DriverStore search, newest first
     driver_store = r"C:\Windows\System32\DriverStore\FileRepository"
     if os.path.isdir(driver_store):
+        found = []
         for entry in os.listdir(driver_store):
             if entry.startswith("asussci2.inf_amd64_"):
                 candidate = os.path.join(driver_store, entry, "ASUSSystemAnalysis", "AsusWinIO64.dll")
                 if os.path.exists(candidate):
-                    return candidate
-    return None
+                    found.append(candidate)
+        found.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        for p in found:
+            _add(p)
+    return candidates
+
+
+def find_dll_path():
+    """Auto-detect AsusWinIO64.dll from the active AsusSAIO driver."""
+    candidates = find_dll_candidates()
+    return candidates[0] if candidates else None
 
 
 def load_config(config_path=None):
@@ -295,9 +322,16 @@ class FanState:
 def calibrate(config):
     """Discover fans and measure max RPM at duty=255."""
     print("=== Fan Calibration ===")
-    print(f"DLL: {config['dll_path']}")
+    cal_dll = config["dll_path"]
+    if not cal_dll:
+        _cands = find_dll_candidates()
+        cal_dll = _cands[0] if _cands else ""
+    if not cal_dll:
+        print("ERROR: Cannot find AsusWinIO64.dll. Set 'dll_path' in config.json")
+        return
+    print(f"DLL: {cal_dll}")
 
-    ctrl = AsusWinIoController(config["dll_path"])
+    ctrl = AsusWinIoController(cal_dll)
     ctrl.load()
     if not ctrl.ensure_initialized():
         print("ERROR: InitializeWinIo failed. Are you running as SYSTEM?")
@@ -396,7 +430,11 @@ def discover(config):
 
     # AsusWinIO fan discovery
     print("\n--- AsusWinIO Fan Indices ---")
-    ctrl = AsusWinIoController(config["dll_path"])
+    discover_dll = config["dll_path"]
+    if not discover_dll:
+        _cands = find_dll_candidates()
+        discover_dll = _cands[0] if _cands else ""
+    ctrl = AsusWinIoController(discover_dll)
     try:
         ctrl.load()
         if not ctrl.ensure_initialized():
@@ -428,6 +466,19 @@ def discover(config):
 
 
 # --- Daemon Mode ---
+STARTUP_FAIL_DELAY_SEC = 60  # slow the wrapper's restart loop on persistent startup failures
+
+
+def _startup_abort(log, msg):
+    """Startup failed. Sleep before exiting so the wrapper's restart loop
+    cannot become a 5-second hot loop on a persistent error (a missing DLL
+    once caused 100k+ restarts and a 50 MB log in the wild)."""
+    log.error(msg)
+    log.error(f"Startup failed; sleeping {STARTUP_FAIL_DELAY_SEC}s before exit to avoid hot-loop restart")
+    time.sleep(STARTUP_FAIL_DELAY_SEC)
+    sys.exit(1)
+
+
 def run_daemon(config):
     log = logging.getLogger("asus-fan-max")
     log.setLevel(logging.INFO)
@@ -438,7 +489,9 @@ def run_daemon(config):
     log.addHandler(sh)
 
     if config["log_file"]:
-        fh = logging.FileHandler(config["log_file"])
+        fh = logging.handlers.RotatingFileHandler(
+            config["log_file"], maxBytes=10 * 1024 * 1024, backupCount=2, encoding="utf-8"
+        )
         fh.setFormatter(fmt)
         log.addHandler(fh)
 
@@ -451,23 +504,35 @@ def run_daemon(config):
     whoami = os.popen("whoami").read().strip()
     log.info(f"Running as: {whoami}")
     if "system" not in whoami.lower():
-        log.error("NOT running as SYSTEM! This tool requires SYSTEM privileges.")
-        log.error("Use: schtasks /Create /TN \"asus-fan-max\" /TR \"<path>\" /SC ONLOGON /RU SYSTEM /F")
-        sys.exit(1)
+        _startup_abort(log, "NOT running as SYSTEM! Use a SYSTEM scheduled task (see install.ps1).")
 
     reader = AtkAcpiReader()
     try:
         reader.open()
     except OSError as e:
-        log.error(f"Cannot open ATKACPI: {e}")
-        sys.exit(1)
+        _startup_abort(log, f"Cannot open ATKACPI: {e}")
 
-    ctrl = AsusWinIoController(config["dll_path"])
-    try:
-        ctrl.load()
-    except Exception as e:
-        log.error(f"Cannot load DLL: {e}")
-        sys.exit(1)
+    # Try every known DLL location, newest first. The DriverStore hash dir of
+    # a stale entry can survive a driver update, so one bad load must not be
+    # fatal while other candidates exist.
+    candidates = [config["dll_path"]] if config["dll_path"] else []
+    candidates += [p for p in find_dll_candidates() if p not in candidates]
+    if not candidates:
+        _startup_abort(log, "Cannot find AsusWinIO64.dll anywhere (DriverStore asussci2.inf_amd64_* missing)")
+    ctrl = None
+    last_err = None
+    for path in candidates:
+        try:
+            c = AsusWinIoController(path)
+            c.load()
+            ctrl = c
+            log.info(f"AsusWinIO64.dll loaded: {path}")
+            break
+        except Exception as e:
+            last_err = e
+            log.warning(f"DLL candidate failed: {path}: {e}")
+    if ctrl is None:
+        _startup_abort(log, f"Cannot load any AsusWinIO64.dll candidate: {last_err}")
 
     cpu_fan = FanState("CPU", config["cpu_fan_idx"], CPU_TEMP_ID, config)
     gpu_fan = FanState("GPU", config["gpu_fan_idx"], GPU_TEMP_ID, config)
@@ -720,10 +785,6 @@ def main():
 
     config = load_config(config_path)
 
-    if not config["dll_path"]:
-        print("ERROR: Cannot find AsusWinIO64.dll. Set 'dll_path' in config.json")
-        sys.exit(1)
-
     if args.status:
         if config["status_file"] and os.path.exists(config["status_file"]):
             print(Path(config["status_file"]).read_text())
@@ -731,10 +792,18 @@ def main():
             print("No status file configured or not found")
         return
 
+    # --discover only needs ATKACPI; the DLL is required for calibrate/daemon
+    # but run_daemon retries every candidate itself, so don't abort here.
+    if args.discover:
+        discover(config)
+        return
+
+    if not config["dll_path"] and not find_dll_candidates():
+        print("ERROR: Cannot find AsusWinIO64.dll. Set 'dll_path' in config.json")
+        sys.exit(1)
+
     if args.calibrate:
         calibrate(config)
-    elif args.discover:
-        discover(config)
     else:
         run_daemon(config)
 

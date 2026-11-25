@@ -1,6 +1,6 @@
 # asus-fan-max
 
-**v1.1.1** · [Changelog](CHANGELOG.md)
+**v1.1.2** · [Changelog](CHANGELOG.md)
 
 > ⚠️ **USE AT YOUR OWN RISK.** This tool bypasses manufacturer-imposed hardware limits via kernel-level driver access. It may void your warranty, reduce fan lifespan, or cause system instability. See [DISCLAIMER.md](DISCLAIMER.md) for full details. By using this software, you accept all responsibility for any consequences.
 
@@ -217,4 +217,5 @@ This project is an independent community effort and is **not affiliated with, en
 - **Fan index varies by hardware**: On some models (or with aftermarket fans) the CPU/GPU fan index is swapped. If the wrong fan spins up, swap `cpu_fan_idx` and `gpu_fan_idx` in `config.json`.
 - **RPM is hardware-specific**: `duty=255` produces different RPM on different fan models. Always run `--calibrate` first — the values in this README are from a G14 with aftermarket high-speed fans.
 - **ATKACPI can hang after power events**: Unplugging/replugging the power adapter can leave `\\.\ATKACPI` unresponsive. v1.1.0 adds a 3s timeout guard per read, plus the installer now generates a self-restarting wrapper, so the daemon recovers automatically. If you're on an older version, update.
-- **ASUS driver updates can break this**: ASUS has previously pushed driver updates that break community fan tools. If the DLL path or fan APIs stop working after an update, re-run `--discover` and check `sc qc AsusSAIO`.
+- **ASUS driver updates can break this**: ASUS has previously pushed driver updates that break community fan tools. The `asussci2.inf_amd64_<hash>` DriverStore directory is renamed and the old one deleted on every update. Since 1.1.2 the daemon discovers the DLL at runtime, globbing every `asussci2.inf_amd64_*` directory and trying each candidate in turn, so a driver update alone no longer kills it. If the DLL API itself changes, re-run `--discover` and check `sc qc AsusSAIO`.
+- **Silent crash loops hide an inactive override**: a startup failure is only one log line, so a wrapper that restarts on crash can loop indefinitely while the 85 °C override does not exist at all. This is exactly what happened in the wild — a driver update invalidated the DLL path and the daemon restart-looped for weeks. Since 1.1.2 fatal startup errors log `Startup failed`, sleep 60 s, and the log rotates at 10 MB. **If your log file is large and contains only startup lines, the daemon is crash-looping and the override is not protecting you.**
